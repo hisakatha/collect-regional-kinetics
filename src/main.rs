@@ -4,6 +4,7 @@ use serde::{Deserialize,Serialize};
 use std::collections::HashMap;
 use std::convert::From;
 use clap::Parser;
+use rayon::prelude::*;
 
 /// a record for PacBio ipdSummary with in-silico model
 #[derive(Debug, Deserialize)]
@@ -349,7 +350,8 @@ fn collect_ipd_summary_in_merged_occ<P: AsRef<Path>>(
         .from_path(occ_path)?;
     let kinetics = kinetics_reader.deserialize::<IpdSummary>().map(|e| e.unwrap().into_pair()).collect::<HashMap<_,_>>();
     let default_ipd_summary_value = IpdSummaryValue::default();
-    let target_kinetics = occ_reader.deserialize::<MergedOcc>().enumerate().flat_map(|(i, occ)| {
+    let merged_occs = occ_reader.deserialize::<MergedOcc>().collect::<Vec<_>>();
+    let target_kinetics = merged_occs.into_par_iter().enumerate().flat_map(|(i, occ)| {
         let target_key = IpdSummaryKey::from(occ.unwrap());
         // generate key(-extension)..key(+width+extension) for each strand
         let pre_target_keys = target_key.extend_without_strand(occ_extension, occ_extension + occ_width - 1);
@@ -368,7 +370,7 @@ fn collect_ipd_summary_in_merged_occ<P: AsRef<Path>>(
         target_vals
     });
     let mut result_writer = csv::Writer::from_path(output_path)?;
-    for target in target_kinetics {
+    for target in target_kinetics.collect::<Vec<_>>() {
         result_writer.serialize(target)?;
     }
     result_writer.flush()?;
