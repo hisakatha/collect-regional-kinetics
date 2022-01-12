@@ -9,10 +9,13 @@ use clap::Parser;
 #[derive(Debug, Deserialize)]
 #[allow(non_snake_case)]
 struct IpdSummary {
+    /// Chromosome name
     refName: String,
+    /// 1-based position
     tpl: i64,
+    /// Strand: 0 = plus, 1 = minus
     strand: u8,
-    base: char,
+    base: Option<char>,
     score: u32,
     tMean: f32,
     tErr: f32,
@@ -48,8 +51,11 @@ impl IpdSummary {
 #[derive(Hash, Eq, PartialEq, Debug)]
 #[allow(non_snake_case)]
 struct IpdSummaryKey {
+    /// Chromosome name
     refName: String,
+    /// 1-based position
     tpl: i64,
+    /// Strand: 0 = plus, 1 = minus
     strand: u8,
 }
 
@@ -76,7 +82,6 @@ impl IpdSummaryKey {
     /// For a negative strand key, extension length `up` and `down` are swapped
     /// and keys in the reversed order are returned
     fn extend(&self, up: i64, down: i64) -> Box<dyn Iterator<Item = Self> + '_> {
-        // ipdSummary: 1-based
         let position_left: i64;
         let position_right: i64;
         match self.strand {
@@ -100,6 +105,90 @@ impl IpdSummaryKey {
         });
         if self.strand == 0 { Box::new(keys) } else { Box::new(keys.rev()) }
     }
+
+    /// Extend IpdSummaryKey ignoring its strand
+    fn extend_without_strand(&self, up: i64, down: i64) -> impl Iterator<Item = IpdSummaryKey> + DoubleEndedIterator + '_ {
+        let position_left = self.tpl.checked_sub(up)
+            .unwrap_or_else(||panic!("[ERROR] Target position overflowed. IpdSummary tpl: {}, extension length: {}", self.tpl, up));
+        let position_right = self.tpl.checked_add(down)
+            .unwrap_or_else(||panic!("[ERROR] Target position overflowed. IpdSummary tpl: {}, extension length: {}", self.tpl, down));
+        let range = position_left..=position_right;
+        range.flat_map(|p| {
+            [Self::new(self.refName.clone(), p, 0), Self::new(self.refName.clone(), p, 1)]
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn key_extend1() {
+        let k = IpdSummaryKey::new("chrX".to_string(), 100, 0);
+        let result = k.extend(1, 2).collect::<Vec<_>>();
+        let expected = vec![
+            IpdSummaryKey::new("chrX".to_string(), 99, 0),
+            IpdSummaryKey::new("chrX".to_string(), 99, 1),
+            IpdSummaryKey::new("chrX".to_string(), 100, 0),
+            IpdSummaryKey::new("chrX".to_string(), 100, 1),
+            IpdSummaryKey::new("chrX".to_string(), 101, 0),
+            IpdSummaryKey::new("chrX".to_string(), 101, 1),
+            IpdSummaryKey::new("chrX".to_string(), 102, 0),
+            IpdSummaryKey::new("chrX".to_string(), 102, 1),
+        ];
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn key_extend1neg() {
+        let k = IpdSummaryKey::new("chrX".to_string(), 100, 1);
+        let result = k.extend(1, 2).collect::<Vec<_>>();
+        let expected = vec![
+            IpdSummaryKey::new("chrX".to_string(), 101, 1),
+            IpdSummaryKey::new("chrX".to_string(), 101, 0),
+            IpdSummaryKey::new("chrX".to_string(), 100, 1),
+            IpdSummaryKey::new("chrX".to_string(), 100, 0),
+            IpdSummaryKey::new("chrX".to_string(), 99, 1),
+            IpdSummaryKey::new("chrX".to_string(), 99, 0),
+            IpdSummaryKey::new("chrX".to_string(), 98, 1),
+            IpdSummaryKey::new("chrX".to_string(), 98, 0),
+        ];
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn key_extend_without_strand1() {
+        let k = IpdSummaryKey::new("chrX".to_string(), 100, 0);
+        let result = k.extend_without_strand(1, 2).collect::<Vec<_>>();
+        let expected = vec![
+            IpdSummaryKey::new("chrX".to_string(), 99, 0),
+            IpdSummaryKey::new("chrX".to_string(), 99, 1),
+            IpdSummaryKey::new("chrX".to_string(), 100, 0),
+            IpdSummaryKey::new("chrX".to_string(), 100, 1),
+            IpdSummaryKey::new("chrX".to_string(), 101, 0),
+            IpdSummaryKey::new("chrX".to_string(), 101, 1),
+            IpdSummaryKey::new("chrX".to_string(), 102, 0),
+            IpdSummaryKey::new("chrX".to_string(), 102, 1),
+        ];
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn key_extend_without_strand1neg() {
+        let k = IpdSummaryKey::new("chrX".to_string(), 100, 1);
+        let result = k.extend_without_strand(1, 2).collect::<Vec<_>>();
+        let expected = vec![
+            IpdSummaryKey::new("chrX".to_string(), 99, 0),
+            IpdSummaryKey::new("chrX".to_string(), 99, 1),
+            IpdSummaryKey::new("chrX".to_string(), 100, 0),
+            IpdSummaryKey::new("chrX".to_string(), 100, 1),
+            IpdSummaryKey::new("chrX".to_string(), 101, 0),
+            IpdSummaryKey::new("chrX".to_string(), 101, 1),
+            IpdSummaryKey::new("chrX".to_string(), 102, 0),
+            IpdSummaryKey::new("chrX".to_string(), 102, 1),
+        ];
+        assert_eq!(result, expected);
+    }
 }
 
 impl From<MergedOcc> for IpdSummaryKey {
@@ -121,7 +210,7 @@ impl From<MergedOcc> for IpdSummaryKey {
 #[allow(non_snake_case)]
 #[allow(dead_code)]
 struct IpdSummaryValue {
-    base: char,
+    base: Option<char>,
     score: u32,
     tMean: f32,
     tErr: f32,
@@ -138,7 +227,7 @@ struct IpdSummaryValue {
 #[allow(non_snake_case)]
 struct MergedOcc {
     refName: String,
-    /// 0-based position
+    /// 0-based left-most position regardless of strand
     start: i64,
     strand: char,
 }
@@ -189,6 +278,67 @@ impl TargetIpd {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[allow(non_snake_case)]
+struct TargetIpdRich {
+    /// Relative position in a target region
+    position: i64,
+    /// Relative strand in a target region
+    strand: char,
+    /// tMean (IPD) in a ipdSummary result
+    value: f32,
+    label: String,
+    /// Index of the source in targets
+    src: i64,
+    base: Option<char>,
+    score: u32,
+    tErr: f32,
+    modelPrediction: f32,
+    ipdRatio: f32,
+    coverage: u32,
+    /// Chromosome of this base in the source data
+    ref_chr: String,
+    /// Position (1-based) of this base in the source data
+    ref_position: i64,
+    ref_strand: u8,
+    region: String,
+}
+
+impl TargetIpdRich {
+    fn create_region(position: i64, region_width: i64, region_extension: i64) -> String {
+        match position {
+            p if p <= 0 => panic!("[ERROR] Position ({}) is smaller than 1", p),
+            // start-side / upstream of the target region
+            p if p <= region_extension => "Upstream",
+            // motif / target region
+            p if p <= region_extension + region_width => "Target",
+            // end-side / downstream of the target region
+            p if p <= 2 * region_extension + region_width => "Downstream",
+            p => panic!("[ERROR] Position ({}) is larger than the target region length", p),
+        }.to_string()
+    }
+
+    fn new(position: i64, strand: char, src: i64, region_width: i64, region_extension: i64, key: IpdSummaryKey, values: &IpdSummaryValue) -> Self {
+        Self {
+            position,
+            strand,
+            value: values.tMean,
+            label: TargetIpd::create_label(position, region_width, region_extension, strand),
+            src,
+            base: values.base,
+            score: values.score,
+            tErr: values.tErr,
+            modelPrediction: values.modelPrediction,
+            ipdRatio: values.ipdRatio,
+            coverage: values.coverage,
+            ref_chr: key.refName,
+            ref_position: key.tpl,
+            ref_strand: key.strand,
+            region: Self::create_region(position, region_width, region_extension),
+        }
+    }
+}
+
 fn collect_ipd_summary_in_merged_occ<P: AsRef<Path>>(
     kinetics_path: P, occ_path: P, occ_width: i64, occ_extension: i64, output_path: P) -> Result<(), Box<dyn Error>>
 {
@@ -199,16 +349,22 @@ fn collect_ipd_summary_in_merged_occ<P: AsRef<Path>>(
         .from_path(occ_path)?;
     let kinetics = kinetics_reader.deserialize::<IpdSummary>().map(|e| e.unwrap().into_pair()).collect::<HashMap<_,_>>();
     let default_ipd_summary_value = IpdSummaryValue::default();
-    let target_kinetics = occ_reader.deserialize::<MergedOcc>().enumerate().flat_map(|(i, e)| {
-        let target_key = IpdSummaryKey::from(e.unwrap());
+    let target_kinetics = occ_reader.deserialize::<MergedOcc>().enumerate().flat_map(|(i, occ)| {
+        let target_key = IpdSummaryKey::from(occ.unwrap());
         // generate key(-extension)..key(+width+extension) for each strand
-        let target_keys = target_key.extend(occ_extension, occ_extension + occ_width - 1);
+        let pre_target_keys = target_key.extend_without_strand(occ_extension, occ_extension + occ_width - 1);
+        let target_keys: Box<dyn Iterator<Item = _>> = match target_key.strand {
+            0 => Box::new(pre_target_keys),
+            1 => Box::new(pre_target_keys.rev()),
+            _ => panic!("Unexpected strand"),
+        };
         let target_vals = target_keys.enumerate().map(|(j, key)| {
             let target_val = kinetics.get(&key).unwrap_or(&default_ipd_summary_value);
             let target_strand = if j % 2 == 0 { '+' } else { '-' };
-            TargetIpd::new(((j / 2) + 1) as i64, target_strand, target_val.tMean, (i + 1) as i64, occ_width, occ_extension)
+            //TargetIpd::new(((j / 2) + 1) as i64, target_strand, target_val.tMean, (i + 1) as i64, occ_width, occ_extension)
+            TargetIpdRich::new(((j / 2) + 1) as i64, target_strand, (i + 1) as i64, occ_width, occ_extension, key, target_val)
         }).collect::<Vec<_>>();
-        if target_vals.len() as i64 != (occ_extension * 2 + occ_width) * 2 { panic!("Unexpected length of results for a motif occ"); }
+        assert_eq!(target_vals.len() as i64, (occ_extension * 2 + occ_width) * 2, "Unexpected length of results for a motif occ");
         target_vals
     });
     let mut result_writer = csv::Writer::from_path(output_path)?;
