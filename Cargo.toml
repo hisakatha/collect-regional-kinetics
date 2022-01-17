@@ -10,3 +10,4 @@ license = "GPL-3.0-or-later"
 csv = "1.1.6"
 serde = { version = "1.0.133", features = ["derive"] }
 clap = { version = "3.0.6", features = ["derive"] }
+hdf5 = "0.8.1"

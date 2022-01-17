@@ -3,7 +3,9 @@ use std::path::Path;
 use serde::{Deserialize,Serialize};
 use std::collections::HashMap;
 use std::convert::From;
-use clap::Parser;
+use clap::{Parser, ArgGroup};
+use hdf5::dataset::Dataset;
+use hdf5::types::{TypeDescriptor, FloatSize, IntSize, FixedAscii};
 
 /// a record for PacBio ipdSummary with in-silico model
 #[derive(Debug, Deserialize)]
@@ -66,6 +68,7 @@ impl IpdSummaryKey {
     }
 
     /// return a new instance with an opposite strand
+    #[allow(dead_code)]
     fn opposite(&self) -> Self {
         Self {
             refName: self.refName.clone(),
@@ -81,6 +84,7 @@ impl IpdSummaryKey {
     /// Extend IpdSummaryKey respecting its strand
     /// For a negative strand key, extension length `up` and `down` are swapped
     /// and keys in the reversed order are returned
+    #[allow(dead_code)]
     fn extend(&self, up: i64, down: i64) -> Box<dyn Iterator<Item = Self> + '_> {
         let position_left: i64;
         let position_right: i64;
@@ -267,6 +271,7 @@ impl TargetIpd {
         format!("{}{}{}", part, relative_position, label_strand)
     }
 
+    #[allow(dead_code)]
     fn new(position: i64, strand: char, value: f32, src: i64, region_width: i64, region_extension: i64) -> Self {
         Self {
             position,
@@ -375,6 +380,142 @@ fn collect_ipd_summary_in_merged_occ<P: AsRef<Path>>(
     Ok(())
 }
 
+/// Chromosomal kinetics data for PacBio ipdSummary output in HDF5 format
+#[derive(Default)]
+#[allow(non_snake_case)]
+struct ChrKineticsHdf5 {
+    tpl: Vec<u32>,
+    strand: Vec<u8>,
+    // convert into Vec<Option<char>>?
+    base: Vec<String>,
+    score: Vec<u32>,
+    tMean: Vec<f32>,
+    tErr: Vec<f32>,
+    modelPrediction: Vec<f32>,
+    ipdRatio: Vec<f32>,
+    coverage: Vec<u32>,
+    frac: Vec<f32>,
+    fracLow: Vec<f32>,
+    fracUp: Vec<f32>,
+}
+
+impl ChrKineticsHdf5 {
+    fn read_hdf5_f32(data: Dataset) -> Vec<f32> {
+        assert_eq!(data.dtype().unwrap().to_descriptor().unwrap(), TypeDescriptor::Float(FloatSize::U4));
+        data.read_raw::<f32>().unwrap()
+    }
+
+    fn read_hdf5_u32(data: Dataset) -> Vec<u32> {
+        assert_eq!(data.dtype().unwrap().to_descriptor().unwrap(), TypeDescriptor::Unsigned(IntSize::U4));
+        data.read_raw::<u32>().unwrap()
+    }
+
+    fn read_hdf5_u8(data: Dataset) -> Vec<u8> {
+        assert_eq!(data.dtype().unwrap().to_descriptor().unwrap(), TypeDescriptor::Unsigned(IntSize::U1));
+        data.read_raw::<u8>().unwrap()
+    }
+
+    fn read_hdf5_str(data: Dataset) -> Vec<String> {
+        assert_eq!(data.dtype().unwrap().to_descriptor().unwrap(), TypeDescriptor::FixedAscii(1));
+        data.read_raw::<FixedAscii<1>>().unwrap().iter().map(|e| e.as_str().to_string()).collect()
+    }
+
+    fn new(chr_file: hdf5::Group) -> Self {
+        Self {
+            tpl: Self::read_hdf5_u32(chr_file.dataset("tpl").unwrap()),
+            strand: Self::read_hdf5_u8(chr_file.dataset("strand").unwrap()),
+            base: Self::read_hdf5_str(chr_file.dataset("base").unwrap()),
+            score: Self::read_hdf5_u32(chr_file.dataset("score").unwrap()),
+            tMean: Self::read_hdf5_f32(chr_file.dataset("tMean").unwrap()),
+            tErr: Self::read_hdf5_f32(chr_file.dataset("tErr").unwrap()),
+            modelPrediction: Self::read_hdf5_f32(chr_file.dataset("modelPrediction").unwrap()),
+            ipdRatio: Self::read_hdf5_f32(chr_file.dataset("ipdRatio").unwrap()),
+            coverage: Self::read_hdf5_u32(chr_file.dataset("coverage").unwrap()),
+            frac: Self::read_hdf5_f32(chr_file.dataset("frac").unwrap()),
+            fracLow: Self::read_hdf5_f32(chr_file.dataset("fracLow").unwrap()),
+            fracUp: Self::read_hdf5_f32(chr_file.dataset("fracUp").unwrap()),
+        }
+    }
+
+    fn kinetics_datasets_from_hdf5_path<P: AsRef<Path>>(path: P) -> Result<HashMap<String, ChrKineticsHdf5>, Box<dyn Error>> {
+        let file = hdf5::File::open(path)?;
+        let datasets = file.member_names()?.into_iter().map(|chr| {
+            let chr_file = file.group(&chr).unwrap();
+            let chr_kinetics = Self::new(chr_file);
+            (chr, chr_kinetics)
+        }).collect::<HashMap<_,_>>();
+        file.close()?;
+        Ok(datasets)
+    }
+
+    fn get_ipd_summary_value(&self, key: &IpdSummaryKey) -> IpdSummaryValue {
+        // IpdSummaryKey tpl (position) is 1-based
+        let pre_index: i64 = (key.tpl - 1) * 2 + (key.strand as i64);
+        let opt_index: Option<usize> = if pre_index >= 0 {
+            Some(pre_index.try_into().unwrap_or_else(|_|panic!("Key position cannot be converted to usize variable")))
+        } else {
+            None
+        };
+        match opt_index {
+            // TODO?: we can use get_unchecked to skip index bound check
+            Some(index) if index < self.coverage.len() && self.coverage[index] > 0 => {
+                debug_assert_eq!(self.tpl[index] as i64, key.tpl);
+                debug_assert_eq!(self.strand[index], key.strand);
+                let has_frac = self.frac[index].is_finite();
+                IpdSummaryValue {
+                    base: self.base[index].chars().next(),
+                    score: self.score[index],
+                    tMean: self.tMean[index],
+                    tErr: self.tErr[index],
+                    modelPrediction: self.modelPrediction[index],
+                    ipdRatio: self.ipdRatio[index],
+                    coverage: self.coverage[index],
+                    frac: if has_frac { Some(self.frac[index]) } else { None },
+                    fracLow: if has_frac { Some(self.fracLow[index]) } else { None },
+                    fracUp: if has_frac { Some(self.fracUp[index]) } else { None },
+                }
+            },
+            _ => IpdSummaryValue::default(),
+        }
+    }
+}
+
+fn collect_hdf5_ipd_summary_in_merged_occ<P: AsRef<Path>>(
+    kinetics_path: P, occ_path: P, occ_width: i64, occ_extension: i64, output_path: P) -> Result<(), Box<dyn Error>>
+{
+    let kinetics_datasets = ChrKineticsHdf5::kinetics_datasets_from_hdf5_path(kinetics_path)?;
+    let mut occ_reader = csv::ReaderBuilder::new()
+        .delimiter(b' ')
+        .has_headers(false)
+        .from_path(occ_path)?;
+    let default_chr_kinetics = ChrKineticsHdf5::default();
+    let target_kinetics = occ_reader.deserialize::<MergedOcc>().enumerate().flat_map(|(i, occ)| {
+        let target_key = IpdSummaryKey::from(occ.unwrap());
+        // generate key(-extension)..key(+width+extension) for each strand
+        let pre_target_keys = target_key.extend_without_strand(occ_extension, occ_extension + occ_width - 1);
+        let target_keys: Box<dyn Iterator<Item = _>> = match target_key.strand {
+            0 => Box::new(pre_target_keys),
+            1 => Box::new(pre_target_keys.rev()),
+            _ => panic!("Unexpected strand"),
+        };
+        let chr_kinetics = kinetics_datasets.get(&target_key.refName).unwrap_or(&default_chr_kinetics);
+        let target_vals = target_keys.enumerate().map(|(j, key)| {
+            let target_val = chr_kinetics.get_ipd_summary_value(&key);
+            let target_strand = if j % 2 == 0 { '+' } else { '-' };
+            //TargetIpd::new(((j / 2) + 1) as i64, target_strand, target_val.tMean, (i + 1) as i64, occ_width, occ_extension)
+            TargetIpdRich::new(((j / 2) + 1) as i64, target_strand, (i + 1) as i64, occ_width, occ_extension, key, &target_val)
+        }).collect::<Vec<_>>();
+        assert_eq!(target_vals.len() as i64, (occ_extension * 2 + occ_width) * 2, "Unexpected length of results for a motif occ");
+        target_vals
+    });
+    let mut result_writer = csv::Writer::from_path(output_path)?;
+    for target in target_kinetics {
+        result_writer.serialize(target)?;
+    }
+    result_writer.flush()?;
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 struct RegionOverflow {
     message: String,
@@ -396,10 +537,18 @@ impl std::default::Default for RegionOverflow {
 /// Collect kinetics info at specified regions
 #[derive(Debug, Parser)]
 #[clap(about, version, author)]
+// Make csv input and HDF5 input mutually exclusive
+#[clap(group(
+        ArgGroup::new("inputs").required(true).args(&["kinetics", "kinetics-hdf5"]),
+        ))]
 struct Args {
     /// Kinetics CSV file generated by PacBio `ipdSummary`
     #[clap(long, short)]
-    kinetics: String,
+    kinetics: Option<String>,
+
+    /// Kinetics HDF5 (.h5) file generated by PacBio `ipdSummary`
+    #[clap(long, short = 'H')]
+    kinetics_hdf5: Option<String>,
 
     /// File listing positions of motif occurrences or target bases.
     /// Each row has chromosome name, 0-based start position, and strand with delimiter of single
@@ -422,13 +571,18 @@ struct Args {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
-    let kinetics_path = args.kinetics;
     let occ_path = args.occ;
     let occ_width = args.occ_width;
     let region_extension = args.extend;
     let output_path = args.output;
     // check if (region_extension * 2 + occ_width) overflows
     region_extension.checked_mul(2).ok_or(RegionOverflow::default())?.checked_add(occ_width).ok_or(RegionOverflow::default())?;
-    collect_ipd_summary_in_merged_occ(kinetics_path, occ_path, occ_width, region_extension, output_path)?;
+    if let Some(kinetics) = args.kinetics {
+        collect_ipd_summary_in_merged_occ(kinetics, occ_path, occ_width, region_extension, output_path)?;
+    } else if let Some(kinetics_hdf5) = args.kinetics_hdf5 {
+        collect_hdf5_ipd_summary_in_merged_occ(kinetics_hdf5, occ_path, occ_width, region_extension, output_path)?;
+    } else {
+        unreachable!();
+    }
     Ok(())
 }
