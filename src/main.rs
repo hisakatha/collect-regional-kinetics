@@ -310,6 +310,8 @@ struct TargetIpdRich {
 }
 
 impl TargetIpdRich {
+    const HEADER: &'static str = "position,strand,value,label,src,base,score,tErr,modelPrediction,ipdRatio,coverage,ref_chr,ref_position,ref_strand,region";
+
     fn create_region(position: i64, region_width: i64, region_extension: i64) -> String {
         match position {
             p if p <= 0 => panic!("[ERROR] Position ({}) is smaller than 1", p),
@@ -347,14 +349,23 @@ impl TargetIpdRich {
 fn collect_ipd_summary_in_merged_occ<P: AsRef<Path>>(
     kinetics_path: P, occ_path: P, occ_width: i64, occ_extension: i64, output_path: P) -> Result<(), Box<dyn Error>>
 {
-    let mut kinetics_reader = csv::Reader::from_path(kinetics_path)?;
     let mut occ_reader = csv::ReaderBuilder::new()
         .delimiter(b' ')
         .has_headers(false)
         .from_path(occ_path)?;
+    let mut occ_peekable = occ_reader.deserialize::<MergedOcc>().enumerate().peekable();
+    if occ_peekable.peek().is_none() {
+        use std::io::Write;
+        let mut output = std::fs::File::create(output_path)?;
+        output.write_all(TargetIpdRich::HEADER.as_bytes())?;
+        output.write_all(b"\n")?;
+        output.flush()?;
+        return Ok(());
+    }
+    let mut kinetics_reader = csv::Reader::from_path(kinetics_path)?;
     let kinetics = kinetics_reader.deserialize::<IpdSummary>().map(|e| e.unwrap().into_pair()).collect::<HashMap<_,_>>();
     let default_ipd_summary_value = IpdSummaryValue::default();
-    let target_kinetics = occ_reader.deserialize::<MergedOcc>().enumerate().flat_map(|(i, occ)| {
+    let target_kinetics = occ_peekable.flat_map(|(i, occ)| {
         let target_key = IpdSummaryKey::from(occ.unwrap());
         // generate key(-extension)..key(+width+extension) for each strand
         let pre_target_keys = target_key.extend_without_strand(occ_extension, occ_extension + occ_width - 1);
@@ -483,13 +494,22 @@ impl ChrKineticsHdf5 {
 fn collect_hdf5_ipd_summary_in_merged_occ<P: AsRef<Path>>(
     kinetics_path: P, occ_path: P, occ_width: i64, occ_extension: i64, output_path: P) -> Result<(), Box<dyn Error>>
 {
-    let kinetics_datasets = ChrKineticsHdf5::kinetics_datasets_from_hdf5_path(kinetics_path)?;
     let mut occ_reader = csv::ReaderBuilder::new()
         .delimiter(b' ')
         .has_headers(false)
         .from_path(occ_path)?;
+    let mut occ_peekable = occ_reader.deserialize::<MergedOcc>().enumerate().peekable();
+    if occ_peekable.peek().is_none() {
+        use std::io::Write;
+        let mut output = std::fs::File::create(output_path)?;
+        output.write_all(TargetIpdRich::HEADER.as_bytes())?;
+        output.write_all(b"\n")?;
+        output.flush()?;
+        return Ok(());
+    }
     let default_chr_kinetics = ChrKineticsHdf5::default();
-    let target_kinetics = occ_reader.deserialize::<MergedOcc>().enumerate().flat_map(|(i, occ)| {
+    let kinetics_datasets = ChrKineticsHdf5::kinetics_datasets_from_hdf5_path(kinetics_path)?;
+    let target_kinetics = occ_peekable.flat_map(|(i, occ)| {
         let target_key = IpdSummaryKey::from(occ.unwrap());
         // generate key(-extension)..key(+width+extension) for each strand
         let pre_target_keys = target_key.extend_without_strand(occ_extension, occ_extension + occ_width - 1);
