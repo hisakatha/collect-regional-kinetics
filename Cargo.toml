@@ -1,6 +1,6 @@
 [package]
 name = "collect_regional_kinetics"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 
@@ -8,6 +8,6 @@ license = "GPL-3.0-or-later"
 
 [dependencies]
 csv = "1.1.6"
-serde = { version = "1.0.133", features = ["derive"] }
-clap = { version = "3.0.6", features = ["derive"] }
+serde = { version = "1.0.137", features = ["derive"] }
+clap = { version = "3.1.18", features = ["derive"] }
 hdf5 = "0.8.1"
